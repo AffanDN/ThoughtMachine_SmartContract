@@ -99,33 +99,6 @@ parameters = [
         shape=NumberShape(min_value=0, max_value=1, step=Decimal("0.001")),
         default_value=Decimal("0.01"),
     ),
-        Parameter(
-        name="interest_rate",
-        shape=NumberShape(
-            min_value=Decimal("0.0"), max_value=Decimal("1.0"), step=Decimal("0.0000001")
-        ),
-        level=ParameterLevel.TEMPLATE,
-        display_name="Interest Rate",
-        description="Product Interest Rate",
-    ),
-    Parameter(
-        name="principal",
-        shape=NumberShape(min_value=Decimal("0")),
-        level=ParameterLevel.INSTANCE,
-        display_name="Loan principal",
-        description="The agreed amount the customer will borrow from the bank.",
-        default_value=Decimal("1000"),
-        update_permission=ParameterUpdatePermission.OPS_EDITABLE,
-    ),
-    Parameter(
-        name="total_term",
-        shape=NumberShape(min_value=Decimal(1), max_value=Decimal(60), step=Decimal(1)),
-        level=ParameterLevel.INSTANCE,
-        display_name="Term (months)",
-        description="The agreed length of the product (in months).",
-        default_value=Decimal(12),
-        update_permission=ParameterUpdatePermission.OPS_EDITABLE,
-    ),
 ]
 
 data_fetchers = [
