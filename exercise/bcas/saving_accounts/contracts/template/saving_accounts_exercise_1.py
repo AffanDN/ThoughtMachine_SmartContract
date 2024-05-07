@@ -12,6 +12,7 @@ from contracts_api import (
     ParameterUpdatePermission,
     PrePostingHookArguments,
     PrePostingHookResult,
+    PreParameterChangeHookArguments,
     Rejection,
     RejectionReason,
     requires,
@@ -25,6 +26,7 @@ from contracts_api import (
     DEFAULT_ADDRESS,
     DEFAULT_ASSET,
     PostingInstructionsDirective,
+    PreParameterChangeHookResult,
 
     TransactionCode,
     CustomInstruction,
@@ -96,6 +98,33 @@ parameters = [
         update_permission=ParameterUpdatePermission.USER_EDITABLE,
         shape=NumberShape(min_value=0, max_value=1, step=Decimal("0.001")),
         default_value=Decimal("0.01"),
+    ),
+        Parameter(
+        name="interest_rate",
+        shape=NumberShape(
+            min_value=Decimal("0.0"), max_value=Decimal("1.0"), step=Decimal("0.0000001")
+        ),
+        level=ParameterLevel.TEMPLATE,
+        display_name="Interest Rate",
+        description="Product Interest Rate",
+    ),
+    Parameter(
+        name="principal",
+        shape=NumberShape(min_value=Decimal("0")),
+        level=ParameterLevel.INSTANCE,
+        display_name="Loan principal",
+        description="The agreed amount the customer will borrow from the bank.",
+        default_value=Decimal("1000"),
+        update_permission=ParameterUpdatePermission.OPS_EDITABLE,
+    ),
+    Parameter(
+        name="total_term",
+        shape=NumberShape(min_value=Decimal(1), max_value=Decimal(60), step=Decimal(1)),
+        level=ParameterLevel.INSTANCE,
+        display_name="Term (months)",
+        description="The agreed length of the product (in months).",
+        default_value=Decimal(12),
+        update_permission=ParameterUpdatePermission.OPS_EDITABLE,
     ),
 ]
 
@@ -228,3 +257,14 @@ def _move_funds_between_vault_accounts(
     )
 
     return [custom_instruction]
+
+def pre_parameter_change_hook(vault: SmartContractVault, hook_arguments: PreParameterChangeHookArguments):
+    restricted_parameters = [PARAM_ZAKAT_RATE]
+    updated_parameters = hook_arguments.updated_parameter_values
+    if any(restricted_param in updated_parameters for restricted_param in restricted_parameters):
+        return PreParameterChangeHookResult(
+            rejection=Rejection(
+                message="Cannot update the zakat rate after account creation",
+                reason_code=RejectionReason.AGAINST_TNC,
+            )
+        )

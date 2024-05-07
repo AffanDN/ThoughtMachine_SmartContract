@@ -19,7 +19,6 @@ from inception_sdk.test_framework.contracts.unit.contracts_api_extension import 
     Settlement,
     Transfer,
 
-
     BalancesObservation,
     BalanceDefaultDict,
     BalanceCoordinate,
@@ -245,3 +244,30 @@ class SavingAccount(ContractTest):
             expected_posting_instruction_directives,
             activation_response.posting_instructions_directives,
         )
+    
+    # Exercise 3
+    def test_reject_zakat_rate_update(self):
+
+        mock_vault = self.create_mock()
+
+        parameters = {'zakat_rate': Decimal('0.03')}
+
+        hook_args = PreParameterChangeHookArguments(
+            effective_datetime=DEFAULT_DATETIME,
+            updated_parameter_values=parameters
+        )
+
+        pre_parameter_change_hook_response = contract.pre_parameter_change_hook(
+            mock_vault,
+            hook_arguments= hook_args
+        )
+
+        expected_response = PreParameterChangeHookResult(
+            rejection=Rejection(
+                message="Cannot update the zakat rate after account creation",
+                reason_code=RejectionReason.AGAINST_TNC,
+            )
+        )
+
+        self.assertEqual(pre_parameter_change_hook_response, expected_response)
+    
