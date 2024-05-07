@@ -19,6 +19,7 @@ from inception_sdk.test_framework.contracts.unit.contracts_api_extension import 
     Settlement,
     Transfer,
 
+
     BalancesObservation,
     BalanceDefaultDict,
     BalanceCoordinate,
@@ -59,14 +60,23 @@ from exercise.bcas.saving_accounts.contracts.template import saving_accounts_exe
 DEFAULT_DATETIME = datetime(2024, 1, 1, tzinfo=ZoneInfo("UTC"))
 DEFAULT_ACCOUNT_ID = "Main account"
 DEFAULT_INTERNAL_ACCOUNT = "1"
+DEFAULT_DEPOSIT_BONUS_PAYOUT_INTERNAL_ACCOUNT = DEFAULT_INTERNAL_ACCOUNT
+DEFAULT_ZAKAT_INTERNAL_ACCOUNT = DEFAULT_INTERNAL_ACCOUNT
+DEFAULT_OPENING_BONUS = Decimal("100")
+DEFAULT_ZAKAT_RATE = Decimal("0.02")
 
 # parameters
 DEFAULT_DENOMINATION = "IDR"
 
 default_template_params = {
     "denomination": DEFAULT_DENOMINATION,
+    "deposit_bonus_payout_internal_account": DEFAULT_DEPOSIT_BONUS_PAYOUT_INTERNAL_ACCOUNT,
+    "zakat_internal_account": DEFAULT_ZAKAT_INTERNAL_ACCOUNT,
+    "zakat_rate":DEFAULT_ZAKAT_RATE,
 }
-default_instance_params = {}
+default_instance_params = {
+    "opening_bonus": DEFAULT_OPENING_BONUS,
+}
 
 default_balances_observation_fetcher_mappings = {
     fetcher.fetcher_id: BalancesObservation(
@@ -158,4 +168,80 @@ class SavingAccount(ContractTest):
         self.assertEqual(
             pre_posting_response,
             expected_response,
+        )
+        
+    # Exercise 2    
+    def test_posting_for_opening_bonus(self):
+
+        mock_vault = self.create_mock()
+        hook_args = ActivationHookArguments(DEFAULT_DATETIME)
+        activation_response = contract.activation_hook(mock_vault, hook_args)
+        zakat=Decimal('2.00')
+        expected_posting_instruction_directives = [
+            PostingInstructionsDirective(
+                posting_instructions=[
+                    CustomInstruction(
+                        postings=[
+                            Posting(
+                                credit=True,
+                                amount=Decimal(DEFAULT_OPENING_BONUS),
+                                denomination=DEFAULT_DENOMINATION,
+                                account_id=DEFAULT_ACCOUNT_ID,
+                                account_address=DEFAULT_ADDRESS,
+                                asset=DEFAULT_ASSET,
+                                phase=Phase.COMMITTED,
+                            ),
+                            Posting(
+                                credit=False,
+                                amount=Decimal(DEFAULT_OPENING_BONUS),
+                                denomination=DEFAULT_DENOMINATION,
+                                account_id=DEFAULT_INTERNAL_ACCOUNT,
+                                account_address=DEFAULT_ADDRESS,
+                                asset=DEFAULT_ASSET,
+                                phase=Phase.COMMITTED,
+                            ),
+                        ],
+                        instruction_details={
+                            "description": "Opening bonus of 100 IDR paid.",
+                            "event_type": "ACCOUNT_OPENING_BONUS",
+                            "ext_client_transaction_id": "OPENING_BONUS_MOCK_HOOK",
+                        },
+                        override_all_restrictions=True,
+                    ),
+                    CustomInstruction(
+                        postings=[
+                            Posting(
+                                credit=True,
+                                amount=zakat,
+                                denomination=DEFAULT_DENOMINATION,
+                                account_id=DEFAULT_INTERNAL_ACCOUNT,
+                                account_address=DEFAULT_ADDRESS,
+                                asset=DEFAULT_ASSET,
+                                phase=Phase.COMMITTED,
+                            ),
+                            Posting(
+                                credit=False,
+                                amount=zakat,
+                                denomination=DEFAULT_DENOMINATION,
+                                account_id=DEFAULT_ACCOUNT_ID,
+                                account_address=DEFAULT_ADDRESS,
+                                asset=DEFAULT_ASSET,
+                                phase=Phase.COMMITTED,
+                            ),
+                        ],
+                        instruction_details={
+                            "description": "Zakat of 2.00 IDR paid.",
+                            "event_type": "ACCOUNT_OPENING_BONUS",
+                            "ext_client_transaction_id": "ZAKAT_MOCK_HOOK",
+                        },
+                        override_all_restrictions=True,
+                    )
+                ],
+                value_datetime=DEFAULT_DATETIME,
+            )
+        ]
+
+        self.assertEqual(
+            expected_posting_instruction_directives,
+            activation_response.posting_instructions_directives,
         )
