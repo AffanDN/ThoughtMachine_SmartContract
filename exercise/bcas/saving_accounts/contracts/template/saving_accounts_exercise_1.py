@@ -8,6 +8,7 @@ from contracts_api import (
     DefinedDateTime,
     DenominationShape,
     fetch_account_data,
+    DeactivationHookArguments,
     Parameter,
     ParameterLevel,
     ParameterUpdatePermission,
@@ -75,6 +76,9 @@ PARAM_AVAILABLE_DEPOSIT_LIMIT = 'available_deposit_limit'
 PARAM_MAXIMUM_BALANCE_LIMIT = 'maximum_balance_limit'
 
 EVENT_ACCOUNT_OPENING_BONUS = "ACCOUNT_OPENING_BONUS"
+
+# Freeze Account
+FLAG_FREEZE_ACCOUNT = "FREEZE_ACCOUNT"
 
 # event types
 ACCRUE_INTEREST = "ACCRUE_INTEREST"
@@ -173,13 +177,24 @@ data_fetchers = [
     ),
 ]
 
-@requires(parameters=True)
+@requires(parameters=True, flags=True)
 @fetch_account_data(balances=["live_balances"])
 def pre_posting_hook(vault: SmartContractVault, hook_arguments: PrePostingHookArguments):
     denomination = vault.get_parameter_timeseries(name=PARAM_DENOMINATION).latest()
+    freeze = vault.get_flag_timeseries(flag=FLAG_FREEZE_ACCOUNT).latest()
+
+    if freeze:
+        return PrePostingHookResult(
+            rejection=Rejection(
+                message=f"Account is frozen. Does not accept external transactions.",
+                reason_code=RejectionReason.AGAINST_TNC,
+            )
+        )
 
     # check denomination
     posting_instructions = hook_arguments.posting_instructions
+
+    #check flag
 
     posting_denominations_used = set(post.denomination for post in posting_instructions)
     disallowed_denominations_used = posting_denominations_used.difference(

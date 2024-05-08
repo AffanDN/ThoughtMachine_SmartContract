@@ -60,13 +60,14 @@ DEFAULT_DATETIME = datetime(2024, 1, 1, tzinfo=ZoneInfo("UTC"))
 DEFAULT_ACCOUNT_ID = "Main account"
 DEFAULT_INTERNAL_ACCOUNT = "1"
 DEFAULT_DEPOSIT_BONUS_PAYOUT_INTERNAL_ACCOUNT = DEFAULT_INTERNAL_ACCOUNT
+DEFAULT_ACCRUE_INTEREST_INTERNAL_ACCOUNT = DEFAULT_INTERNAL_ACCOUNT
 DEFAULT_ZAKAT_INTERNAL_ACCOUNT = DEFAULT_INTERNAL_ACCOUNT
 DEFAULT_OPENING_BONUS = Decimal("100")
-DEFAULT_ZAKAT_RATE = Decimal("0.02")
-DEFAULT_MAXIMUM_BALANCE_LIMIT = Decimal("1000000")
+DEFAULT_FLAG_FREEZE_ACCOUNT = "FREEZE_ACCOUNT"
 DEFAULT_ACCRUE_INTEREST = "ACCRUE_INTEREST"
 DEFAULT_INTEREST_RATE = Decimal("0.01")
-DEFAULT_ACCRUE_INTEREST_INTERNAL_ACCOUNT = DEFAULT_INTERNAL_ACCOUNT
+DEFAULT_ZAKAT_RATE = Decimal("0.02")
+DEFAULT_MAXIMUM_BALANCE_LIMIT = Decimal("1000000")
 
 # parameters
 DEFAULT_DENOMINATION = "IDR"
@@ -74,11 +75,11 @@ DEFAULT_DENOMINATION = "IDR"
 default_template_params = {
     "denomination": DEFAULT_DENOMINATION,
     "deposit_bonus_payout_internal_account": DEFAULT_DEPOSIT_BONUS_PAYOUT_INTERNAL_ACCOUNT,
+    "accrue_interest_internal_account": DEFAULT_ACCRUE_INTEREST_INTERNAL_ACCOUNT,
     "zakat_internal_account": DEFAULT_ZAKAT_INTERNAL_ACCOUNT,
+    "interest_rate": DEFAULT_INTEREST_RATE,
     "zakat_rate":DEFAULT_ZAKAT_RATE,
     "maximum_balance_limit":DEFAULT_MAXIMUM_BALANCE_LIMIT,
-    "interest_rate": DEFAULT_INTEREST_RATE,
-    "accrue_interest_internal_account": DEFAULT_ACCRUE_INTEREST_INTERNAL_ACCOUNT,
 }
 default_instance_params = {
     "opening_bonus": DEFAULT_OPENING_BONUS,
@@ -251,8 +252,47 @@ class SavingAccount(ContractTest):
             expected_posting_instruction_directives,
             activation_response.posting_instructions_directives,
         )
-    
-    # Exercise 3
+
+    # Exercise 6
+    def test_freeze_account_reject_any_transactions(self):
+
+        posting_amount = Decimal(10)
+
+        inbound_hard_settlement = self.inbound_hard_settlement(
+            amount=posting_amount,
+            denomination="IDR",
+            target_account_id=DEFAULT_ACCOUNT_ID,
+            internal_account_id=DEFAULT_INTERNAL_ACCOUNT,
+            own_account_id=DEFAULT_ACCOUNT_ID,
+        )
+        posting_instructions = [inbound_hard_settlement]
+
+        hook_args = PrePostingHookArguments(
+            effective_datetime=DEFAULT_DATETIME,
+            posting_instructions=posting_instructions,
+            client_transactions=ClientTransaction(
+                client_transaction_id="MOCK_POSTING",
+                account_id=DEFAULT_ACCOUNT_ID,
+                posting_instructions=posting_instructions,
+                tside=contract.tside,
+            ),
+        )
+        mock_vault = self.create_mock(
+            flags={DEFAULT_FLAG_FREEZE_ACCOUNT: FlagTimeseries([(DEFAULT_DATETIME, True)])},
+        )
+        pre_posting_response = contract.pre_posting_hook(mock_vault, hook_args)
+        expected_response = PrePostingHookResult(
+            rejection=Rejection(
+                message="Account is frozen. Does not accept external transactions.",
+                reason_code=RejectionReason.AGAINST_TNC,
+            )
+        )
+        self.assertEqual(
+            pre_posting_response,
+            expected_response,
+        )
+
+    # Exercise 4
     def test_reject_zakat_rate_update(self):
 
         mock_vault = self.create_mock()
@@ -277,59 +317,6 @@ class SavingAccount(ContractTest):
         )
 
         self.assertEqual(pre_parameter_change_hook_response, expected_response)
-    
-    # Exercise 4
-    def test_derived_parameter_hook_calculates_available_deposit_limit(self):
-        def test_factory(current_default_balance):
-            balances_observation_fetcher_mappings = {
-                contract.data_fetchers[0].fetcher_id: BalancesObservation(
-                    balances=BalanceDefaultDict(
-                        mapping={
-                            BalanceCoordinate(
-                                account_address=DEFAULT_ADDRESS,
-                                asset=DEFAULT_ASSET,
-                                denomination=DEFAULT_DENOMINATION,
-                                phase=Phase.COMMITTED,
-                            ): Balance(
-                                credit=Decimal(current_default_balance),
-                                debit=Decimal(0),
-                                net=Decimal(current_default_balance),
-                            )
-                        }
-                    ),
-                    value_datetime=DEFAULT_DATETIME,
-                )
-            }
-            mock_vault = self.create_mock(
-                balances_observation_fetchers_mapping=balances_observation_fetcher_mappings
-            )
-            hook_args = DerivedParameterHookArguments(
-                effective_datetime=DEFAULT_DATETIME
-            )
-            derived_parameter_response = contract.derived_parameter_hook(
-                mock_vault, hook_args
-            )
-            expected_response = DerivedParameterHookResult(
-                parameters_return_value={
-                    "available_deposit_limit": Decimal(DEFAULT_MAXIMUM_BALANCE_LIMIT)
-                    - Decimal(current_default_balance),
-                }
-            )
-
-            self.assertEqual(
-                derived_parameter_response,
-                expected_response,
-            )
-
-        for possible_deposit_value in [
-            Decimal(0),
-            Decimal(100),
-            Decimal(DEFAULT_MAXIMUM_BALANCE_LIMIT),
-            # ideally this would give 0 instead of a negative value to accommodate business logic
-            # but this is a lesson in writing contracts, not translating business requirements
-            Decimal(DEFAULT_MAXIMUM_BALANCE_LIMIT) + Decimal(100),
-        ]:
-            test_factory(possible_deposit_value)
     
     # Exercise 5
     def test_scheduled_code_hook_calculates_and_accrue_interest_correctly(self):
@@ -417,3 +404,57 @@ class SavingAccount(ContractTest):
             expected_response,
             scheduled_event_hook_response,
         )
+
+    # Exercise 3
+    def test_derived_parameter_hook_calculates_available_deposit_limit(self):
+        def test_factory(current_default_balance):
+            balances_observation_fetcher_mappings = {
+                contract.data_fetchers[0].fetcher_id: BalancesObservation(
+                    balances=BalanceDefaultDict(
+                        mapping={
+                            BalanceCoordinate(
+                                account_address=DEFAULT_ADDRESS,
+                                asset=DEFAULT_ASSET,
+                                denomination=DEFAULT_DENOMINATION,
+                                phase=Phase.COMMITTED,
+                            ): Balance(
+                                credit=Decimal(current_default_balance),
+                                debit=Decimal(0),
+                                net=Decimal(current_default_balance),
+                            )
+                        }
+                    ),
+                    value_datetime=DEFAULT_DATETIME,
+                )
+            }
+            mock_vault = self.create_mock(
+                balances_observation_fetchers_mapping=balances_observation_fetcher_mappings
+            )
+            hook_args = DerivedParameterHookArguments(
+                effective_datetime=DEFAULT_DATETIME
+            )
+            derived_parameter_response = contract.derived_parameter_hook(
+                mock_vault, hook_args
+            )
+            expected_response = DerivedParameterHookResult(
+                parameters_return_value={
+                    "available_deposit_limit": Decimal(DEFAULT_MAXIMUM_BALANCE_LIMIT)
+                    - Decimal(current_default_balance),
+                }
+            )
+
+            self.assertEqual(
+                derived_parameter_response,
+                expected_response,
+            )
+
+        for possible_deposit_value in [
+            Decimal(0),
+            Decimal(100),
+            Decimal(DEFAULT_MAXIMUM_BALANCE_LIMIT),
+            # ideally this would give 0 instead of a negative value to accommodate business logic
+            # but this is a lesson in writing contracts, not translating business requirements
+            Decimal(DEFAULT_MAXIMUM_BALANCE_LIMIT) + Decimal(100),
+        ]:
+            test_factory(possible_deposit_value)
+    
