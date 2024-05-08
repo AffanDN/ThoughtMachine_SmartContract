@@ -1,6 +1,7 @@
 # standard libs
 from decimal import Decimal
-from typing import Optional
+from typing import Optional,Union
+from dateutil.relativedelta import relativedelta
 
 from contracts_api import (
     BalancesObservationFetcher,
@@ -12,7 +13,6 @@ from contracts_api import (
     ParameterUpdatePermission,
     PrePostingHookArguments,
     PrePostingHookResult,
-    PreParameterChangeHookArguments,
     Rejection,
     RejectionReason,
     requires,
@@ -26,12 +26,31 @@ from contracts_api import (
     DEFAULT_ADDRESS,
     DEFAULT_ASSET,
     PostingInstructionsDirective,
-    PreParameterChangeHookResult,
 
     TransactionCode,
     CustomInstruction,
     Posting,
     Phase,
+    SmartContractEventType,
+    ScheduledEventHookArguments,
+    BalanceCoordinate,
+    UpdateAccountEventTypeDirective,
+    ScheduledEventHookResult,
+    ScheduleExpression,
+    ScheduledEvent,
+    PreParameterChangeHookArguments,
+    PreParameterChangeHookResult,
+    BalanceDefaultDict,
+    AuthorisationAdjustment,
+    InboundAuthorisation,
+    InboundHardSettlement,
+    OutboundAuthorisation,
+    OutboundHardSettlement,
+    Release,
+    Settlement,
+    Transfer,
+    DerivedParameterHookArguments,
+    DerivedParameterHookResult,
 )
 
 from inception_sdk.vault.contracts.extensions.contracts_api_extensions.vault_types import SmartContractVault
@@ -50,6 +69,8 @@ PARAM_BONUS_PAYABLE_INTERNAL_ACCOUNT = "deposit_bonus_payout_internal_account"
 PARAM_ZAKAT_INTERNAL_ACCOUNT = "zakat_internal_account"
 PARAM_OPENING_BONUS = 'opening_bonus'
 PARAM_ZAKAT_RATE = 'zakat_rate'
+PARAM_AVAILABLE_DEPOSIT_LIMIT = 'available_deposit_limit'
+PARAM_MAXIMUM_BALANCE_LIMIT = 'maximum_balance_limit'
 
 EVENT_ACCOUNT_OPENING_BONUS = "ACCOUNT_OPENING_BONUS"
 
@@ -62,6 +83,14 @@ parameters = [
         description="The default denomination of the account.",
         update_permission=ParameterUpdatePermission.USER_EDITABLE,
         default_value="IDR",
+    ),
+    Parameter(
+        name=PARAM_MAXIMUM_BALANCE_LIMIT,
+        display_name="Maximum Deposit Limit",
+        description="The maximum balance possible for this account.",
+        level=ParameterLevel.TEMPLATE,
+        shape=NumberShape(min_value=0, max_value=100000, step=Decimal("0.01")),
+        default_value=Decimal("100000"),
     ),
     Parameter(
         name=PARAM_BONUS_PAYABLE_INTERNAL_ACCOUNT,
@@ -99,6 +128,15 @@ parameters = [
         shape=NumberShape(min_value=0, max_value=1, step=Decimal("0.001")),
         default_value=Decimal("0.01"),
     ),
+    # derived parameters
+    Parameter(
+        name=PARAM_AVAILABLE_DEPOSIT_LIMIT,
+        display_name="Available Deposit Limit",
+        description="The available deposit limit remaining based on current account balance.",
+        level=ParameterLevel.INSTANCE,
+        shape=NumberShape(min_value=0, step=1),
+        derived=True,
+    ),
 ]
 
 data_fetchers = [
@@ -125,6 +163,30 @@ def pre_posting_hook(vault: SmartContractVault, hook_arguments: PrePostingHookAr
             rejection=Rejection(
                 message=f"Postings are not allowed. Only postings in {denomination} are accepted.",
                 reason_code=RejectionReason.WRONG_DENOMINATION,
+            )
+        )
+    
+    # check deposit limit
+    deposit_limit = Decimal(
+        vault.get_parameter_timeseries(name="maximum_balance_limit").latest()
+    )
+    # check existing account balance on the DEFAULT address using the fetcher
+    balances = vault.get_balances_observation(fetcher_id="live_balances").balances
+    default_balance = balances[
+        BalanceCoordinate(DEFAULT_ADDRESS, DEFAULT_ASSET, denomination, Phase.COMMITTED)
+    ].net
+
+    # check expected total balance taking into account existing balance and incoming postings
+    incoming_postings_amount = total_balances(hook_arguments.posting_instructions)[
+        BalanceCoordinate(DEFAULT_ADDRESS, DEFAULT_ASSET, denomination, Phase.COMMITTED)
+    ].net
+    expected_balance_total = incoming_postings_amount + default_balance
+
+    if expected_balance_total > deposit_limit:
+        return PrePostingHookResult(
+            rejection=Rejection(
+                message=f"Incoming deposit breaches deposit limit of {deposit_limit}.",
+                reason_code=RejectionReason.AGAINST_TNC,
             )
         )
     
@@ -180,7 +242,7 @@ def activation_hook(
             override_all_restrictions=True,
         )
     )
-
+   
     return ActivationHookResult(
         posting_instructions_directives=[
             PostingInstructionsDirective(
@@ -189,6 +251,60 @@ def activation_hook(
             )
         ],
     )
+
+
+@requires(parameters=True)
+def pre_parameter_change_hook(vault: SmartContractVault, hook_arguments: PreParameterChangeHookArguments):
+    restricted_parameters = [PARAM_ZAKAT_RATE]
+    updated_parameters = hook_arguments.updated_parameter_values
+    if any(restricted_param in updated_parameters for restricted_param in restricted_parameters):
+        return PreParameterChangeHookResult(
+            rejection=Rejection(
+                message="Cannot update the zakat rate after account creation",
+                reason_code=RejectionReason.AGAINST_TNC,
+            )
+        )
+    
+
+@requires(parameters=True)
+@fetch_account_data(balances=["live_balances"])
+def derived_parameter_hook(vault, hook_arguments: DerivedParameterHookArguments):
+    denomination = vault.get_parameter_timeseries(name=PARAM_DENOMINATION).latest()
+    deposit_limit = Decimal(
+        vault.get_parameter_timeseries(name=PARAM_MAXIMUM_BALANCE_LIMIT).latest()
+    )
+
+    balances = vault.get_balances_observation(fetcher_id="live_balances").balances
+    default_balance = balances[
+        BalanceCoordinate(DEFAULT_ADDRESS, DEFAULT_ASSET, denomination, Phase.COMMITTED)
+    ].net
+
+    available_deposit_limit = deposit_limit - default_balance
+
+    return DerivedParameterHookResult(
+        parameters_return_value={PARAM_AVAILABLE_DEPOSIT_LIMIT: available_deposit_limit}
+    )
+
+
+def total_balances(
+    input_posting_instructions: list[
+        Union[
+            AuthorisationAdjustment,
+            CustomInstruction,
+            InboundAuthorisation,
+            InboundHardSettlement,
+            OutboundAuthorisation,
+            OutboundHardSettlement,
+            Release,
+            Settlement,
+            Transfer,
+        ]
+    ]
+) -> BalanceDefaultDict:
+    total_balances = BalanceDefaultDict()
+    for posting_instruction in input_posting_instructions:
+        total_balances += posting_instruction.balances()
+    return total_balances
 
 def _move_funds_between_vault_accounts(
     amount: Decimal,
@@ -230,14 +346,3 @@ def _move_funds_between_vault_accounts(
     )
 
     return [custom_instruction]
-
-def pre_parameter_change_hook(vault: SmartContractVault, hook_arguments: PreParameterChangeHookArguments):
-    restricted_parameters = [PARAM_ZAKAT_RATE]
-    updated_parameters = hook_arguments.updated_parameter_values
-    if any(restricted_param in updated_parameters for restricted_param in restricted_parameters):
-        return PreParameterChangeHookResult(
-            rejection=Rejection(
-                message="Cannot update the zakat rate after account creation",
-                reason_code=RejectionReason.AGAINST_TNC,
-            )
-        )
