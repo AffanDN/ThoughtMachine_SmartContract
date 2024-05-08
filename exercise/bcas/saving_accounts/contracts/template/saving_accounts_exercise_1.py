@@ -8,7 +8,6 @@ from contracts_api import (
     DefinedDateTime,
     DenominationShape,
     fetch_account_data,
-    DeactivationHookArguments,
     Parameter,
     ParameterLevel,
     ParameterUpdatePermission,
@@ -54,9 +53,6 @@ from contracts_api import (
     DerivedParameterHookResult,
 )
 
-from inception_sdk.vault.contracts.extensions.contracts_api_extensions.vault_types import SmartContractVault
-
-
 api = "4.0.0"
 version = "1.0.0"
 display_name = "Saving Account"
@@ -76,8 +72,6 @@ PARAM_AVAILABLE_DEPOSIT_LIMIT = 'available_deposit_limit'
 PARAM_MAXIMUM_BALANCE_LIMIT = 'maximum_balance_limit'
 
 EVENT_ACCOUNT_OPENING_BONUS = "ACCOUNT_OPENING_BONUS"
-
-# Freeze Account
 FLAG_FREEZE_ACCOUNT = "FREEZE_ACCOUNT"
 
 # event types
@@ -179,22 +173,11 @@ data_fetchers = [
 
 @requires(parameters=True, flags=True)
 @fetch_account_data(balances=["live_balances"])
-def pre_posting_hook(vault: SmartContractVault, hook_arguments: PrePostingHookArguments):
+def pre_posting_hook(vault, hook_arguments: PrePostingHookArguments):
     denomination = vault.get_parameter_timeseries(name=PARAM_DENOMINATION).latest()
-    freeze = vault.get_flag_timeseries(flag=FLAG_FREEZE_ACCOUNT).latest()
-
-    if freeze:
-        return PrePostingHookResult(
-            rejection=Rejection(
-                message=f"Account is frozen. Does not accept external transactions.",
-                reason_code=RejectionReason.AGAINST_TNC,
-            )
-        )
 
     # check denomination
     posting_instructions = hook_arguments.posting_instructions
-
-    #check flag
 
     posting_denominations_used = set(post.denomination for post in posting_instructions)
     disallowed_denominations_used = posting_denominations_used.difference(
@@ -205,6 +188,16 @@ def pre_posting_hook(vault: SmartContractVault, hook_arguments: PrePostingHookAr
             rejection=Rejection(
                 message=f"Postings are not allowed. Only postings in {denomination} are accepted.",
                 reason_code=RejectionReason.WRONG_DENOMINATION,
+            )
+        )
+    
+    # Reject postings if the account is frozen
+    is_account_frozen = vault.get_flag_timeseries(flag=FLAG_FREEZE_ACCOUNT).latest()
+    if is_account_frozen:
+        return PrePostingHookResult( 
+            rejection= Rejection(
+                message= "Account is frozen. Does not accept external transactions.",
+                reason_code=RejectionReason.AGAINST_TNC,
             )
         )
     
@@ -235,7 +228,7 @@ def pre_posting_hook(vault: SmartContractVault, hook_arguments: PrePostingHookAr
 
 @requires(parameters=True)
 def activation_hook(
-    vault: SmartContractVault, hook_arguments: ActivationHookArguments
+    vault, hook_arguments: ActivationHookArguments
 ) -> Optional[ActivationHookResult]:
     denomination = vault.get_parameter_timeseries(name=PARAM_DENOMINATION).latest()
     opening_bonus = Decimal(
@@ -286,7 +279,6 @@ def activation_hook(
     )
     account_creation_date = vault.get_account_creation_datetime()
 
-    # APPLY INTEREST SCHEDULE
     interest_application_schedule = _get_next_schedule_expression(
         account_creation_date, relativedelta(days=1)
     )
@@ -317,7 +309,7 @@ def scheduled_event_hook(vault, hook_arguments: ScheduledEventHookArguments):
 
 
 @requires(parameters=True)
-def pre_parameter_change_hook(vault: SmartContractVault, hook_arguments: PreParameterChangeHookArguments):
+def pre_parameter_change_hook(vault, hook_arguments: PreParameterChangeHookArguments):
     restricted_parameters = [PARAM_ZAKAT_RATE]
     updated_parameters = hook_arguments.updated_parameter_values
     if any(restricted_param in updated_parameters for restricted_param in restricted_parameters):
@@ -349,7 +341,7 @@ def derived_parameter_hook(vault, hook_arguments: DerivedParameterHookArguments)
     )
 
 
-def _handle_accrue_interest_schedule(vault:SmartContractVault, hook_arguments:ScheduledEventHookArguments):
+def _handle_accrue_interest_schedule(vault, hook_arguments:ScheduledEventHookArguments):
     denomination = vault.get_parameter_timeseries(name=PARAM_DENOMINATION).latest()
     interest_rate = vault.get_parameter_timeseries(name=PARAM_INTEREST_RATE).latest()
     interest_paid_internal_account = vault.get_parameter_timeseries(
