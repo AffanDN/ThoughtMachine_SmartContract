@@ -66,13 +66,24 @@ supported_denominations = ["IDR"]
 # CONSTANTS
 PARAM_DENOMINATION = "denomination"
 PARAM_BONUS_PAYABLE_INTERNAL_ACCOUNT = "deposit_bonus_payout_internal_account"
+PARAM_ACCRUE_INTEREST_INTERNAL_ACCOUNT = "accrue_interest_internal_account"
 PARAM_ZAKAT_INTERNAL_ACCOUNT = "zakat_internal_account"
 PARAM_OPENING_BONUS = 'opening_bonus'
 PARAM_ZAKAT_RATE = 'zakat_rate'
+PARAM_INTEREST_RATE = 'interest_rate'
 PARAM_AVAILABLE_DEPOSIT_LIMIT = 'available_deposit_limit'
 PARAM_MAXIMUM_BALANCE_LIMIT = 'maximum_balance_limit'
 
 EVENT_ACCOUNT_OPENING_BONUS = "ACCOUNT_OPENING_BONUS"
+
+# event types
+ACCRUE_INTEREST = "ACCRUE_INTEREST"
+
+event_types = [
+    SmartContractEventType(
+        name=ACCRUE_INTEREST,
+    ),
+]
 
 parameters = [
     Parameter(
@@ -101,12 +112,28 @@ parameters = [
         default_value="BONUS_PAYABLE_INTERNAL_ACCOUNT",
     ),
     Parameter(
+        name=PARAM_ACCRUE_INTEREST_INTERNAL_ACCOUNT,
+        display_name="Accrue Interest Internal Account",
+        description="The internal account to debit accrue interest from.",
+        level=ParameterLevel.TEMPLATE,
+        shape=AccountIdShape(),
+        default_value="ACCRUE_INTEREST_INTERNAL_ACCOUNT",
+    ),
+    Parameter(
         name=PARAM_ZAKAT_INTERNAL_ACCOUNT,
         display_name="Zakat Internal Account",
         description="The internal account to credit zakat from customer.",
         level=ParameterLevel.TEMPLATE,
         shape=AccountIdShape(),
         default_value="ZAKAT_INTERNAL_ACCOUNT",
+    ),
+    Parameter(
+        name=PARAM_INTEREST_RATE,
+        display_name="Interest Rate (APR)",
+        description="The interest rate of the account.",
+        level=ParameterLevel.TEMPLATE,
+        shape=NumberShape(min_value=0, max_value=1, step=Decimal("0.001")),
+        default_value=Decimal("0.01"),
     ),
     # instance parameters
     Parameter(
@@ -242,7 +269,12 @@ def activation_hook(
             override_all_restrictions=True,
         )
     )
-   
+    account_creation_date = vault.get_account_creation_datetime()
+
+    # APPLY INTEREST SCHEDULE
+    interest_application_schedule = _get_next_schedule_expression(
+        account_creation_date, relativedelta(days=1)
+    )
     return ActivationHookResult(
         posting_instructions_directives=[
             PostingInstructionsDirective(
@@ -250,7 +282,23 @@ def activation_hook(
                 value_datetime=hook_arguments.effective_datetime,
             )
         ],
+        scheduled_events_return_value={
+            ACCRUE_INTEREST: ScheduledEvent(
+                start_datetime=hook_arguments.effective_datetime,
+                expression=interest_application_schedule,
+            )
+        },
     )
+
+
+@requires(event_type="ACCRUE_INTEREST", parameters=True)
+@fetch_account_data(event_type="ACCRUE_INTEREST", balances=["live_balances"])
+def scheduled_event_hook(vault, hook_arguments: ScheduledEventHookArguments):
+    if hook_arguments.event_type == ACCRUE_INTEREST:
+        scheduled_event_hook_result = _handle_accrue_interest_schedule(
+            vault, hook_arguments
+        )
+    return scheduled_event_hook_result
 
 
 @requires(parameters=True)
@@ -285,6 +333,75 @@ def derived_parameter_hook(vault, hook_arguments: DerivedParameterHookArguments)
         parameters_return_value={PARAM_AVAILABLE_DEPOSIT_LIMIT: available_deposit_limit}
     )
 
+
+def _handle_accrue_interest_schedule(vault:SmartContractVault, hook_arguments:ScheduledEventHookArguments):
+    denomination = vault.get_parameter_timeseries(name=PARAM_DENOMINATION).latest()
+    interest_rate = vault.get_parameter_timeseries(name=PARAM_INTEREST_RATE).latest()
+    interest_paid_internal_account = vault.get_parameter_timeseries(
+        name=PARAM_ACCRUE_INTEREST_INTERNAL_ACCOUNT
+    ).latest()
+
+    balances = vault.get_balances_observation(fetcher_id="live_balances").balances
+    default_balance = balances[
+        BalanceCoordinate(DEFAULT_ADDRESS, DEFAULT_ASSET, denomination, Phase.COMMITTED)
+    ].net
+    daily_interest_rate = interest_rate / 365
+    interest_amount = default_balance * (daily_interest_rate)
+    interest_amount = Decimal(round(interest_amount))
+
+    if interest_amount > 0:
+        posting_instruction = _move_funds_between_vault_accounts(
+            from_account_id=interest_paid_internal_account,
+            from_account_address=DEFAULT_ADDRESS,
+            to_account_id=vault.account_id,
+            to_account_address=DEFAULT_ADDRESS,
+            asset=DEFAULT_ASSET,
+            denomination=denomination,
+            amount=interest_amount,
+            instruction_details={
+                # CLv4 has no client transaction ID - this is for compatibility with legacy integrations
+                "ext_client_transaction_id": f"ACCRUE_INTEREST_{vault.get_hook_execution_id()}",
+                "description": (
+                    f"Accrueing interest of {interest_amount} {denomination}"
+                    f" at yearly rate of {interest_rate}."
+                ),
+                "event_type": f"ACCRUE_INTEREST",
+            },
+        )
+        posting_instructions_directives = [
+            PostingInstructionsDirective(
+                posting_instructions=posting_instruction,
+                client_batch_id=f"{hook_arguments.event_type}_{vault.get_hook_execution_id()}",
+                value_datetime=hook_arguments.effective_datetime,
+            )
+        ]
+    else:
+        posting_instructions_directives = []
+
+    update_account_event_type_directives = [
+        UpdateAccountEventTypeDirective(
+            event_type=ACCRUE_INTEREST,
+            expression=_get_next_schedule_expression(
+                hook_arguments.effective_datetime, relativedelta(days=1)
+            ),
+        )
+    ]
+    return ScheduledEventHookResult(
+        posting_instructions_directives=posting_instructions_directives,
+        update_account_event_type_directives=update_account_event_type_directives,
+    )
+
+
+def _get_next_schedule_expression(start_date, offset):
+    next_schedule_date = start_date + offset
+    return ScheduleExpression(
+        year=str(next_schedule_date.year),
+        month=str(next_schedule_date.month),
+        day=str(next_schedule_date.day),
+        hour="0",
+        minute="10",
+        second="0",
+    )
 
 def total_balances(
     input_posting_instructions: list[

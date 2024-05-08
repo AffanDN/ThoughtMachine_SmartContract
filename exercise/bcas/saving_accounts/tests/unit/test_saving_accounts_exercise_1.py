@@ -64,6 +64,9 @@ DEFAULT_ZAKAT_INTERNAL_ACCOUNT = DEFAULT_INTERNAL_ACCOUNT
 DEFAULT_OPENING_BONUS = Decimal("100")
 DEFAULT_ZAKAT_RATE = Decimal("0.02")
 DEFAULT_MAXIMUM_BALANCE_LIMIT = Decimal("1000000")
+DEFAULT_ACCRUE_INTEREST = "ACCRUE_INTEREST"
+DEFAULT_INTEREST_RATE = Decimal("0.01")
+DEFAULT_ACCRUE_INTEREST_INTERNAL_ACCOUNT = DEFAULT_INTERNAL_ACCOUNT
 
 # parameters
 DEFAULT_DENOMINATION = "IDR"
@@ -74,6 +77,8 @@ default_template_params = {
     "zakat_internal_account": DEFAULT_ZAKAT_INTERNAL_ACCOUNT,
     "zakat_rate":DEFAULT_ZAKAT_RATE,
     "maximum_balance_limit":DEFAULT_MAXIMUM_BALANCE_LIMIT,
+    "interest_rate": DEFAULT_INTEREST_RATE,
+    "accrue_interest_internal_account": DEFAULT_ACCRUE_INTEREST_INTERNAL_ACCOUNT,
 }
 default_instance_params = {
     "opening_bonus": DEFAULT_OPENING_BONUS,
@@ -325,3 +330,90 @@ class SavingAccount(ContractTest):
             Decimal(DEFAULT_MAXIMUM_BALANCE_LIMIT) + Decimal(100),
         ]:
             test_factory(possible_deposit_value)
+    
+    # Exercise 5
+    def test_scheduled_code_hook_calculates_and_accrue_interest_correctly(self):
+        # start test in state where there is money in the account for interest to be accrued on
+        mock_vault = self.create_mock(
+            balances_observation_fetchers_mapping={
+                "live_balances": BalancesObservation(
+                    balances=BalanceDefaultDict(
+                        mapping={
+                            BalanceCoordinate(
+                                account_address=DEFAULT_ADDRESS,
+                                asset=DEFAULT_ASSET,
+                                denomination=DEFAULT_DENOMINATION,
+                                phase=Phase.COMMITTED,
+                            ): Balance(
+                                credit=Decimal(10000000), debit=Decimal(0), net=(10000000)
+                            ),
+                        }
+                    ),
+                    value_datetime=DEFAULT_DATETIME,
+                )
+            }
+        )
+        hook_args = ScheduledEventHookArguments(
+            effective_datetime=DEFAULT_DATETIME, event_type=DEFAULT_ACCRUE_INTEREST
+        )
+        scheduled_event_hook_response = contract.scheduled_event_hook(
+            mock_vault, hook_args
+        )
+        interest_amount = Decimal(274)
+        posting_instruction_directives = PostingInstructionsDirective(
+            posting_instructions=[
+                CustomInstruction(
+                    postings=[
+                        Posting(
+                            credit=True,
+                            amount=interest_amount,
+                            denomination=DEFAULT_DENOMINATION,
+                            account_id=DEFAULT_ACCOUNT_ID,
+                            account_address=DEFAULT_ADDRESS,
+                            asset=DEFAULT_ASSET,
+                            phase=Phase.COMMITTED,
+                        ),
+                        Posting(
+                            credit=False,
+                            amount=interest_amount,
+                            denomination=DEFAULT_DENOMINATION,
+                            account_id=DEFAULT_INTERNAL_ACCOUNT,
+                            account_address=DEFAULT_ADDRESS,
+                            asset=DEFAULT_ASSET,
+                            phase=Phase.COMMITTED,
+                        ),
+                    ],
+                    instruction_details={
+                        "ext_client_transaction_id": f"ACCRUE_INTEREST_{mock_vault.get_hook_execution_id()}",
+                        "description": (
+                            f"Accrueing interest of {interest_amount} {DEFAULT_DENOMINATION}"
+                            f" at yearly rate of {Decimal(DEFAULT_INTEREST_RATE)}."
+                        ),
+                        "event_type": f"ACCRUE_INTEREST",
+                    },
+                    override_all_restrictions=None,
+                ),
+            ],
+            client_batch_id=f"{DEFAULT_ACCRUE_INTEREST}_{mock_vault.get_hook_execution_id()}",
+            value_datetime=DEFAULT_DATETIME,
+        )
+        next_schedule_date = DEFAULT_DATETIME + relativedelta(days=1)
+        update_account_event_type_directives = UpdateAccountEventTypeDirective(
+            event_type=DEFAULT_ACCRUE_INTEREST,
+            expression=ScheduleExpression(
+                year=str(next_schedule_date.year),
+                month=str(next_schedule_date.month),
+                day=str(next_schedule_date.day),
+                hour="0",
+                minute="10",
+                second="0",
+            ),
+        )
+        expected_response = ScheduledEventHookResult(
+            posting_instructions_directives=[posting_instruction_directives],
+            update_account_event_type_directives=[update_account_event_type_directives],
+        )
+        self.assertEqual(
+            expected_response,
+            scheduled_event_hook_response,
+        )
