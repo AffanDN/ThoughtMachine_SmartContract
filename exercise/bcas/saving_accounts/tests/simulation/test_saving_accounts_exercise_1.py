@@ -16,6 +16,7 @@ from inception_sdk.test_framework.contracts.simulation.data_objects.data_objects
     ContractModuleConfig,
     ExpectedDerivedParameter,
     ExpectedRejection,
+    ExpectedSchedule,
     SimulationTestScenario,
     SubTest,
 )
@@ -186,7 +187,153 @@ class SavingAccount(SimulationTestCase):
             sub_tests=sub_tests,
         )
         self.run_test_scenario(test_scenario)
+        
+    def test_derived_parameters(self):
+        """
+        Test that derived parameters are calculated
+        """
 
+        start = default_simulation_start_date
+        end = start + relativedelta(days=1)
+
+        sub_tests = [
+            SubTest(
+                description="Test that derived parameters are calculated properly",
+                events=[],
+                # Expected available_deposit_limit should be Rp1000000 - Rp98 = 999902
+                expected_derived_parameters=[
+                    ExpectedDerivedParameter(
+                        timestamp=end,
+                        account_id=ACCOUNT_NAME,
+                        value="999902",
+                        name="available_deposit_limit",
+                    )
+                ]
+            )
+        ]
+
+        test_scenario = self._get_simulation_test_scenario(
+            start=start,
+            end=end,
+            sub_tests=sub_tests
+        )
+        self.run_test_scenario(test_scenario)
+
+    def test_reject_wrong_denomination(self):
+        """
+        Test that posting denominations are checked and accepted or rejected where necessary
+        """
+        start = default_simulation_start_date
+        end = start + relativedelta(days=1)
+
+        sub_tests = [
+            # DEFAULT balance should be Rp98 since it has been deducted by zakat for Rp2 for opening bonus
+            # After inbound posting Rp1000 the DEFAULT balance should be Rp1098
+            SubTest(
+                description="test balance correct after single deposit made to account",
+                events=[
+                    create_inbound_hard_settlement_instruction(
+                        denomination="IDR",
+                        amount="1000",
+                        # posting at ( start + 1h )
+                        event_datetime=start + relativedelta(hours=1),
+                    ),
+                ],
+                expected_balances_at_ts={
+                    # Before posting ( start + 59m59s )
+                    start
+                    + relativedelta(minutes=59, seconds=50): {
+                        ACCOUNT_NAME: [(DEFAULT_DIMENSIONS, "98")]
+                    },
+                    # After posting ( start + 1h1s )
+                    start
+                    + relativedelta(hours=1, seconds=1): {
+                        ACCOUNT_NAME: [(DEFAULT_DIMENSIONS, "1098")]
+                    },
+                },
+            ),
+            # DEFAULT balance should be Rp1098 since the posting has been rejected
+            SubTest(
+                description="test balance correct after deposit with wrong denomination is made",
+                events=[
+                    create_inbound_hard_settlement_instruction(
+                        denomination="USD",
+                        amount="1000",
+                        # posting at ( start + 2h )
+                        event_datetime=start + relativedelta(hours=2),
+                    ),
+                ],
+                expected_balances_at_ts={
+                    # Before posting ( start + 1h59m )
+                    start
+                    + relativedelta(hours=1, minutes=59): {
+                        ACCOUNT_NAME: [(DEFAULT_DIMENSIONS, "1098")]
+                    },
+                    # After posting ( start + 2h1s )
+                    start
+                    + relativedelta(hours=2, seconds=1): {
+                        ACCOUNT_NAME: [(DEFAULT_DIMENSIONS, "1098")]
+                    },
+                },
+                expected_posting_rejections=[
+                    ExpectedRejection(
+                        timestamp=start + relativedelta(hours=2),
+                        rejection_type="WrongDenomination",
+                        rejection_reason=("Postings are not allowed. Only postings in IDR are accepted."),
+                    )
+                ],
+            ),
+        ]
+
+        test_scenario = self._get_simulation_test_scenario(
+            start=start,
+            end=end,
+            sub_tests=sub_tests,
+        )
+        self.run_test_scenario(test_scenario)
+    
+    def test_interest_accrual_schedule(self):
+        """
+        Test that interest is applied correctly
+        """
+
+        start = default_simulation_start_date
+        end = start + relativedelta(months=1, days=1)
+
+        sub_tests = [
+            SubTest(
+                description="test interest accrual schedule",
+                events=[
+                    # top up account to accrue interset on
+                    create_inbound_hard_settlement_instruction(
+                        denomination="IDR",
+                        amount="99902",
+                        event_datetime= start + relativedelta(hours=1),
+                    ),
+                ],
+                expected_schedules=[
+                    ExpectedSchedule(
+                        run_times =[start + relativedelta(months=1, minute=10)],
+                        event_id = "ACCRUE_INTEREST",
+                        account_id=ACCOUNT_NAME,
+                    ),
+                ],
+                # DEFAULT BALANCE after posting should be Rp100000
+                # After interset accrual for 1 month the interest should be Rp93
+                # The Final DEFAULT balance should be Rp100093
+                expected_balances_at_ts={
+                    start: {ACCOUNT_NAME: [(DEFAULT_DIMENSIONS, "98")]},
+                    end : {ACCOUNT_NAME: [(DEFAULT_DIMENSIONS, "100093")]},
+                },
+            ),
+        ]
+
+        test_scenario = self._get_simulation_test_scenario(
+            start=start,
+            end=end,
+            sub_tests=sub_tests,
+        )
+        self.run_test_scenario(test_scenario)
 
 
 if __name__ == "__main__":
